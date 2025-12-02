@@ -3,7 +3,19 @@ from typing import Any, Dict, List
 from collections import deque
 
 class StateExtractor:
-    """Extracts state features for the RL agent."""
+    """
+    Extracts state features for the RL agent.
+    
+    All features are normalized/relative to ensure generalization across:
+    - Different problem sizes (20, 50, 100+ cities)
+    - Different instance types (random, clustered, etc.)
+    - Different cost scales
+    - Different evaluation budgets
+    
+    Feature dimensions: 9 landscape features + 2 * num_algorithms history features
+    Note: Feature dimension depends on number of algorithms, so trained models
+    require the same number of algorithms at test time.
+    """
     
     def __init__(self, problem: Any, algorithm_names: List[str], 
                 sample_size: int = 50):
@@ -38,12 +50,15 @@ class StateExtractor:
         """
         Extract state features for RL agent.
         
+        All features are normalized to ensure generalization across different
+        TSP problem configurations (sizes, types, cost scales).
+        
         Args:
             context_manager: ContextManager instance
             max_evaluations: Maximum evaluations allowed
             
         Returns:
-            Feature vector as numpy array
+            Feature vector as numpy array (normalized, ready for neural network)
         """
         features = []
         
@@ -55,7 +70,39 @@ class StateExtractor:
         history_features = self._compute_algorithm_history_features(context_manager)
         features.extend(history_features)
         
-        return np.array(features, dtype=np.float32)
+        feature_vector = np.array(features, dtype=np.float32)
+        
+        # Validate feature ranges for debugging (can be disabled in production)
+        self._validate_features(feature_vector)
+        
+        return feature_vector
+    
+    def _validate_features(self, features: np.ndarray) -> None:
+        """
+        Validate that features are in expected ranges.
+        Helps catch normalization issues during development.
+        
+        Args:
+            features: Feature vector to validate
+        """
+        # Check for NaN or Inf
+        if np.any(np.isnan(features)) or np.any(np.isinf(features)):
+            import warnings
+            warnings.warn(
+                f"Warning: Found NaN or Inf in features! "
+                f"NaN count: {np.sum(np.isnan(features))}, "
+                f"Inf count: {np.sum(np.isinf(features))}"
+            )
+        
+        # Check for extreme values (likely normalization issues)
+        extreme_threshold = 100.0
+        extreme_count = np.sum(np.abs(features) > extreme_threshold)
+        if extreme_count > 0:
+            import warnings
+            warnings.warn(
+                f"Warning: Found {extreme_count} features with absolute value > {extreme_threshold}. "
+                f"This may indicate normalization issues."
+            )
     
     def _compute_landscape_features(self, context_manager: Any, 
                                     max_evaluations: int) -> List[float]:
@@ -66,9 +113,15 @@ class StateExtractor:
         total_evals = context_manager.get_total_evaluations()
         
         # 1. Current Best Cost (normalized by initial cost if available)
+        # This ensures generalization across different problem scales
         if len(self.best_cost_history) > 0:
             initial_cost = self.best_cost_history[0]
-            normalized_cost = best_cost / initial_cost if initial_cost > 0 else 1.0
+            if initial_cost > 1e-6:
+                normalized_cost = best_cost / initial_cost
+                # Clip to reasonable range [0, 2] - values > 1 mean worse than initial
+                normalized_cost = np.clip(normalized_cost, 0.0, 2.0)
+            else:
+                normalized_cost = 1.0
         else:
             normalized_cost = 1.0
         features.append(normalized_cost)
@@ -85,9 +138,17 @@ class StateExtractor:
         local_optima_density = self._estimate_local_optima_density(best_solution)
         features.append(local_optima_density)
         
-        # 5. Solution Quality Variance (from cost history)
+        # 5. Solution Quality Variance (from cost history) - normalized
         quality_variance = np.std(list(self.cost_history)) if len(self.cost_history) > 1 else 0.0
-        quality_variance_normalized = quality_variance / (best_cost + 1e-6)
+        # Normalize by best cost, with fallback to initial cost if best_cost is very small
+        if best_cost > 1e-6:
+            quality_variance_normalized = quality_variance / best_cost
+        elif len(self.best_cost_history) > 0 and self.best_cost_history[0] > 1e-6:
+            quality_variance_normalized = quality_variance / self.best_cost_history[0]
+        else:
+            quality_variance_normalized = 0.0
+        # Clip to reasonable range for stability
+        quality_variance_normalized = min(1.0, quality_variance_normalized)
         features.append(quality_variance_normalized)
         
         # 6. Recent Best Cost Stagnation (no improvement counter)
@@ -112,14 +173,32 @@ class StateExtractor:
         """Compute algorithm-specific history features."""
         features = []
         
+        # Get initial cost for normalization
+        initial_cost = self.best_cost_history[0] if len(self.best_cost_history) > 0 else None
+        current_best_cost = context_manager.get_best()[1]
+        
         for alg_name in self.algorithm_names:
             history = self.algorithm_history[alg_name]
             
-            # Feature 1: Average improvement when this algorithm was selected
+            # Feature 1: Average improvement when this algorithm was selected (NORMALIZED)
+            # Normalize by initial cost to ensure generalization across problem sizes
             if len(history['cost_improvements']) > 0:
-                avg_improvement = np.mean(history['cost_improvements'])
+                improvements = list(history['cost_improvements'])
+                if initial_cost is not None and initial_cost > 0:
+                    # Normalize improvements by initial cost
+                    normalized_improvements = [imp / initial_cost for imp in improvements]
+                    avg_improvement = np.mean(normalized_improvements)
+                elif current_best_cost > 0:
+                    # Fallback: normalize by current best cost if initial cost unavailable
+                    normalized_improvements = [imp / current_best_cost for imp in improvements]
+                    avg_improvement = np.mean(normalized_improvements)
+                else:
+                    avg_improvement = 0.0
             else:
                 avg_improvement = 0.0
+            
+            # Clip to reasonable range [0, 1] for stability
+            avg_improvement = np.clip(avg_improvement, 0.0, 1.0)
             features.append(avg_improvement)
             
             # Feature 2: Selection frequency (normalized)
@@ -206,8 +285,15 @@ class StateExtractor:
             return 0.0
         
         # Count how many recent entries have same best cost
+        # Use relative tolerance instead of absolute for generalization
         best = recent[-1]
-        stagnant_count = sum(1 for cost in recent if abs(cost - best) < 1e-6)
+        if best > 0:
+            # Use relative tolerance: 0.01% of best cost
+            tolerance = best * 1e-4
+            stagnant_count = sum(1 for cost in recent if abs(cost - best) < tolerance)
+        else:
+            # Fallback to absolute tolerance if cost is zero (shouldn't happen)
+            stagnant_count = sum(1 for cost in recent if abs(cost - best) < 1e-6)
         
         return stagnant_count / len(recent)
     
