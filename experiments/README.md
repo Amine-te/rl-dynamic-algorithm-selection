@@ -4,59 +4,98 @@ Use Stable-Baselines3 PPO (SB3) instead of the custom PPO trainer.
 
 ---
 
+## 🚀 Automatic Experiment Management
+
+Experiments are now **automatically organized** with unique names and directories:
+
+- **Auto-naming**: `tsp{CITIES}_{TIMESTEPS}k_{TIMESTAMP}`
+- **Auto-directories**: `checkpoints/tsp50_500k_20241201_143022/`
+- **No overwrites**: Each run creates a unique experiment
+
+**Example outputs:**
+```
+checkpoints/
+├── tsp20_100k_20241201_143022/    # First run
+│   ├── config.json
+│   ├── best_model/
+│   ├── checkpoints/
+│   ├── tensorboard/
+│   └── evaluation_results_sb3.json
+└── tsp50_500k_20241201_150045/    # Second run
+    ├── config.json
+    ├── best_model/
+    └── ...
+```
+
+**List experiments:**
+```bash
+python experiments/list_experiments.py
+```
+
+---
+
 ## Training (SB3 PPO)
 
-**Quick start (default):**
+**Quick start (auto-named):**
 ```bash
 python experiments/train_sb3.py
 ```
 
-**Custom training (50 cities):**
+**Custom training:**
 ```bash
+# Auto-named experiment
 python experiments/train_sb3.py \
   --total_timesteps 500000 \
-  --num_cities 50 \
-  --instance_type mixed \
-  --max_evaluations 20000 \
-  --schedule_interval 1000 \
-  --checkpoint_dir checkpoints/tsp50_sb3
+  --num_cities 50
+
+# Custom name
+python experiments/train_sb3.py \
+  --experiment_name my_custom_experiment \
+  --total_timesteps 500000 \
+  --num_cities 50
 ```
 
-**Smaller test run:**
+**Small test run:**
 ```bash
 python experiments/train_sb3.py \
   --total_timesteps 100000 \
   --num_cities 20 \
-  --max_evaluations 5000 \
-  --schedule_interval 500 \
-  --checkpoint_dir checkpoints/test_sb3
+  --max_evaluations 5000
 ```
 
 ---
 
 ## Evaluation (SB3 PPO)
 
+**Find experiment directory:**
+```bash
+python experiments/list_experiments.py
+```
+
 **Evaluate best model with baselines (compares both cost and execution time):**
 ```bash
 python experiments/evaluate_sb3.py \
-  --checkpoint_dir checkpoints/tsp50_sb3 \
+  --checkpoint_dir checkpoints/YOUR_EXPERIMENT_NAME \
   --model_file best_model/best_model.zip \
   --num_test_instances 20 \
   --compare_baselines
 ```
 
-**Transfer to different city sizes:**
+**Transfer evaluation (test generalization):**
 ```bash
+# Train on 50 cities, test on 75 cities
 python experiments/evaluate_sb3.py \
-  --checkpoint_dir checkpoints/tsp50_sb3 \
+  --checkpoint_dir checkpoints/tsp50_500k_20241201_143022 \
   --num_cities 75 \
   --num_test_instances 10
 ```
 
-**Single-line minimal:**
+**Quick evaluation:**
 ```bash
-python experiments/train_sb3.py --total_timesteps 100000 --num_cities 20 --checkpoint_dir checkpoints/test_sb3
-python experiments/evaluate_sb3.py --checkpoint_dir checkpoints/test_sb3 --model_file best_model/best_model.zip --num_test_instances 5
+# Train and evaluate in sequence
+python experiments/train_sb3.py --total_timesteps 100000 --num_cities 20
+python experiments/list_experiments.py  # Find the experiment name
+python experiments/evaluate_sb3.py --checkpoint_dir checkpoints/LATEST_EXPERIMENT --num_test_instances 5
 ```
 
 **Evaluation output includes:**
@@ -65,4 +104,5 @@ python experiments/evaluate_sb3.py --checkpoint_dir checkpoints/test_sb3 --model
 - Statistical summary (mean ± std, min/max, improvement percentages)
 - Results saved to `evaluation_results_sb3.json`
 
+---
 ---
