@@ -21,3 +21,4 @@ logs/
 *.pkl
 *.pth
 .DS_Store
+NEXT_STEPS.md
